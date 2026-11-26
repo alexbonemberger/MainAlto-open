@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     steps:
@@ -32,11 +32,14 @@ jobs:
         run: |
           @'
           import base64, os, pathlib, re, subprocess, sys
+          stage = 'INPUT'
           def main():
+              global stage
               token = os.environ.pop("MAINALTO_CI_READ_TOKEN", "")
               pin = os.environ.pop("MAINALTO_CI_SOURCE_SHA", "")
               if not token or not re.fullmatch("[0-9a-f]{40}", pin):
                   raise RuntimeError()
+              stage = "TEMP_ROOT"
               root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "mainalto-private-ci"
               root.mkdir(exist_ok=False)
               source = root / "source"
@@ -52,19 +55,28 @@ jobs:
                   if p.returncode:
                       raise RuntimeError()
                   return p.stdout
+              stage = "GIT_INIT"
               git("init", "--template=")
               git("config", "core.autocrlf", "false")
+              git("config", "core.longpaths", "true")
               git("remote", "add", "origin", "https://github.com/alexbonemberger/MainAlto.git")
+              stage = "GIT_FETCH"
               git("fetch", "--no-tags", "--no-recurse-submodules", "origin", pin, auth=True)
               token = ""
+              stage = "GIT_CHECKOUT"
               git("checkout", "--detach", pin)
-              if git("rev-parse", "HEAD").decode().strip() != pin or git("status", "--porcelain"):
+              stage = "GIT_IDENTITY"
+              if git("rev-parse", "HEAD").decode().strip() != pin:
                   raise RuntimeError()
+              stage = "GIT_CLEAN"
+              if git("status", "--porcelain"):
+                  raise RuntimeError()
+              stage = "PIN_RECORD"
               (root / "approved-pin").write_text(pin, encoding="ascii")
           try:
               main()
           except BaseException:
-              print("PRIVATE_SOURCE_MATERIALIZATION_FAIL")
+              print("PRIVATE_SOURCE_MATERIALIZATION_FAIL_" + stage)
               sys.exit(1)
           print("PRIVATE_SOURCE_MATERIALIZATION_PASS")
           '@ | python -I -B -S -
@@ -134,11 +146,14 @@ jobs:
         shell: pwsh
         run: |
           @'
-          import os, pathlib, shutil, sys
+          import os, pathlib, shutil, stat, sys
+          def retry(func, path, exc):
+              os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+              func(path)
           root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "mainalto-private-ci"
           try:
               if root.exists():
-                  shutil.rmtree(root)
+                  shutil.rmtree(root, onexc=retry)
               if root.exists():
                   raise RuntimeError()
           except BaseException:

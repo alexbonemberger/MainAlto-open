@@ -1,0 +1,10 @@
+name: CI Availability
+on: [push, workflow_dispatch]
+jobs:
+  probe:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: python --version

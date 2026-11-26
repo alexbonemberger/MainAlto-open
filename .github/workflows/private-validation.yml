@@ -90,7 +90,10 @@ jobs:
               git("config", "core.autocrlf", "false")
               git("config", "core.longpaths", "true")
               # In this disposable checkout only, preserve exact committed bytes.
-              (source / ".git" / "info" / "attributes").write_bytes(b"* -text -filter -ident -working-tree-encoding -eol\n")
+              stage = "GIT_RAW_ATTRIBUTES"
+              info = source / ".git" / "info"
+              info.mkdir(exist_ok=True)
+              (info / "attributes").write_bytes(b"* -text -filter -ident -working-tree-encoding -eol\n")
               git("remote", "add", "origin", "https://github.com/alexbonemberger/MainAlto.git")
               stage = "GIT_FETCH"
               git("fetch", "--no-tags", "--no-recurse-submodules", "origin", pin, auth=True)

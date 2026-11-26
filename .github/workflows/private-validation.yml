@@ -2,6 +2,11 @@ name: Private MainAlto validation
 
 on:
   workflow_dispatch:
+    inputs:
+      windows_diagnostic:
+        description: 'Diagnose only the two unresolved Windows suites'
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -16,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-latest]
+        os: ${{ fromJSON(inputs.windows_diagnostic && '["windows-latest"]' || '["ubuntu-24.04","windows-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     steps:
@@ -121,6 +126,8 @@ jobs:
 
       - name: Run fixed fixture suites
         shell: pwsh
+        env:
+          MAINALTO_CI_WINDOWS_DIAGNOSTIC: ${{ inputs.windows_diagnostic }}
         run: |
           @'
           import os, pathlib, subprocess, sys
@@ -154,7 +161,87 @@ jobs:
               if count == 0:
                   raise RuntimeError()
               return count
+          def token_facts():
+              import ctypes as c
+              from ctypes import wintypes as w
+              k = c.WinDLL("kernel32", use_last_error=True)
+              a = c.WinDLL("advapi32", use_last_error=True)
+              k.GetCurrentProcess.restype = w.HANDLE
+              k.CloseHandle.argtypes = [w.HANDLE]
+              k.CloseHandle.restype = w.BOOL
+              a.OpenProcessToken.argtypes = [w.HANDLE, w.DWORD, c.POINTER(w.HANDLE)]
+              a.OpenProcessToken.restype = w.BOOL
+              a.GetTokenInformation.argtypes = [w.HANDLE, w.DWORD, c.c_void_p, w.DWORD, c.POINTER(w.DWORD)]
+              a.GetTokenInformation.restype = w.BOOL
+              k.IsProcessInJob.argtypes = [w.HANDLE, w.HANDLE, c.POINTER(w.BOOL)]
+              k.IsProcessInJob.restype = w.BOOL
+              process = k.GetCurrentProcess()
+              token = w.HANDLE()
+              if not a.OpenProcessToken(process, 8, c.byref(token)):
+                  print("HOST_TOKEN_FACTS_UNAVAILABLE")
+                  return
+              try:
+                  def get(kind):
+                      value = w.DWORD()
+                      size = w.DWORD()
+                      if not a.GetTokenInformation(token, kind, c.byref(value), c.sizeof(value), c.byref(size)):
+                          return None
+                      return value.value
+                  elevation = get(20)
+                  token_type = get(18)
+                  session = get(12)
+                  print("HOST_ELEVATED=" + {0:"NO",1:"YES"}.get(elevation,"UNKNOWN"))
+                  print("HOST_TOKEN_TYPE=" + {1:"DEFAULT",2:"FULL",3:"LIMITED"}.get(token_type,"UNKNOWN"))
+                  print("HOST_SESSION=" + ("UNKNOWN" if session is None else "ZERO" if session == 0 else "NONZERO"))
+                  job = w.BOOL()
+                  success = k.IsProcessInJob(process, None, c.byref(job))
+                  print("HOST_IN_JOB=" + ("UNKNOWN" if not success else "YES" if job.value else "NO"))
+              finally:
+                  k.CloseHandle(token)
+
+          def summarize_failures(suite, output):
+              import hashlib, re
+              # The public output is deliberately limited to opaque test IDs and fixed categories.
+              raw = output.decode("utf-8", "replace")
+              pattern = r"(?m)^(FAIL|ERROR): ([A-Za-z0-9_.]+ \([A-Za-z0-9_.]+\))[ \t\r]*$"
+              matches = list(re.finditer(pattern, raw))
+              exception_types = ("PermissionError", "AssertionError", "OSError", "RuntimeError", "FileNotFoundError", "TimeoutExpired", "JSONDecodeError", "ValueError", "KeyError", "ImportError", "ModuleNotFoundError", "AttributeError", "TypeError")
+              categories = {
+                  "C6_ELEVATED_LEGACY_PAIR_REQUIRED": "TOKEN_PAIR_REQUIRED",
+                  "C6_LEGACY_TOKEN_UNREPRESENTATIVE": "TOKEN_PAIR_UNREPRESENTATIVE",
+                  "C6_LEGACY_CHILD_TOKEN_DRIFT": "CHILD_TOKEN_DRIFT",
+                  "C6_LEGACY_LAUNCH": "NATIVE_LAUNCH",
+                  "A4_NORMAL_OPERATOR_REQUIRED": "OPERATOR_ROLE",
+                  "A4_WORKER_RUNTIME_PATH": "RUNTIME_PATH",
+                  "A4_UNEXPECTED_SUPERVISOR": "SUPERVISOR_IDENTITY",
+                  "A4_PEER_IMAGE": "PEER_IMAGE",
+                  "A4_COG5_MANAGED_ORIGIN": "SOURCE_ORIGIN",
+                  "A4_G0_PREREVIEW_SOURCE_DRIFT": "SOURCE_DRIFT",
+                  "FIXTURE_BLOB_DRIFT": "FIXTURE_BLOB_DRIFT",
+                  "HISTORICAL_TEST_PATCH_DRIFT": "FIXTURE_PATCH_DRIFT",
+              }
+              def classify(block):
+                  types = sorted({kind for kind in exception_types if re.search(r"(?m)^(?:[A-Za-z0-9_.]+\.)?" + kind + r"(?::|$)", block)})
+                  codes = sorted({label for marker,label in categories.items() if marker in block})
+                  win = sorted({n for n in re.findall(r"\[WinError ([0-9]+)\]", block) if n in {"2","3","5","6","32","87","109","122","203","233","259","267","740","995","1008","1314","1326","1349","1364","1385","1460"}})
+                  return ("|".join(types) or "UNCLASSIFIED", "|".join(codes) or "NONE", "|".join(win) or "NONE")
+              print("DIAG_" + suite + "_FAILURE_HEADERS=" + str(len(matches)))
+              for i, match in enumerate(matches[:32]):
+                  block = raw[match.end():matches[i+1].start() if i+1 < len(matches) else len(raw)]
+                  # Stop at the unittest summary so subsequent unrelated text cannot be classified.
+                  block = re.split(r"(?m)^[-=]{20,}[ \t\r]*$", block, maxsplit=2)
+                  block = "\n".join(block[:2])
+                  ident = hashlib.sha256(match.group(2).encode("ascii")).hexdigest()[:24]
+                  typ, category, win = classify(block)
+                  print("DIAG_" + suite + "=" + match.group(1) + ":" + ident + ";TYPE=" + typ + ";CATEGORY=" + category + ";WINERROR=" + win)
+              if not matches:
+                  typ, category, win = classify(raw)
+                  print("DIAG_" + suite + "=NO_TEST_HEADER;TYPE=" + typ + ";CATEGORY=" + category + ";WINERROR=" + win)
+
           def main():
+              diagnostic = os.environ.get("MAINALTO_CI_WINDOWS_DIAGNOSTIC", "false").lower() == "true"
+              if diagnostic and os.name != "nt":
+                  raise RuntimeError()
               root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "mainalto-private-ci"
               source = root / "source"
               pin = (root / "approved-pin").read_text(encoding="ascii")
@@ -182,13 +269,22 @@ jobs:
               if git("rev-parse", "HEAD").decode().strip() != pin:
                   raise RuntimeError()
               verify_raw_tree(source, pin, git)
+              if diagnostic:
+                  token_facts()
+                  suites = [(name, args) for name, args in suites if name in ("BOOTSTRAP", "A4")]
+                  if len(suites) != 2:
+                      raise RuntimeError()
               failed = False
               for name, args in suites:
                   try:
-                      p = subprocess.run(args, cwd=source, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=240)
+                      p = subprocess.run(args, cwd=source, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE if diagnostic else subprocess.DEVNULL, stderr=subprocess.STDOUT if diagnostic else subprocess.DEVNULL, timeout=240)
                       result = "PASS" if p.returncode == 0 else "FAIL"
-                  except subprocess.TimeoutExpired:
+                      if diagnostic and p.returncode != 0:
+                          summarize_failures(name, p.stdout)
+                  except subprocess.TimeoutExpired as exc:
                       result = "TIMEOUT"
+                      if diagnostic and exc.stdout:
+                          summarize_failures(name, exc.stdout)
                   except OSError:
                       result = "START_FAIL"
                   print(name + "=" + result, flush=True)

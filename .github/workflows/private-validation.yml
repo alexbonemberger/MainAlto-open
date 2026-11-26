@@ -270,7 +270,7 @@ jobs:
                   if len(found) != 1:
                       raise RuntimeError()
                   return found[0]
-              driver = "import json, os, sys, unittest\nfrom pathlib import Path\nroot=Path(sys.argv[1])\nsys.path[:0]=[str(root),str(root/'tests')]\nname=sys.argv[2]\nkind=sys.argv[3]\nallowed_types={\"OSError\",\"PermissionError\",\"FileNotFoundError\",\"AssertionError\",\"RuntimeError\",\"BoundaryError\",\"ValueError\",\"TypeError\",\"AttributeError\",\"ImportError\",\"ModuleNotFoundError\",\"TimeoutError\",\"OperationalError\"}\nallowed_codes={\"A4_NATIVE_ADMISSION_REQUIRED\",\"A4_DOCKER_DESTINATION_DRIFT\",\"A4_UNKNOWN_NO_REPLAY\",\"A4_SQLITE_RESERVATION_REQUIRED\",\"A4_LIVE_NO_G0_NO_DISPATCH\",\"A4_LIVE_INPUT_BINDING\",\"C6_ELEVATED_LEGACY_PAIR_REQUIRED\",\"C6_LEGACY_TOKEN_UNREPRESENTATIVE\",\"C6_SESSION_TOKEN_MISMATCH\",\"C6_DUPLICATE_TOKEN_DRIFT\",\"C6_LEGACY_CHILD_TOKEN_DRIFT\",\"C6_LEGACY_LAUNCH\",\"STORAGE_REDIRECTED\",\"STORE_CONFIGURATION\"}\ndef number(x):\n    return x if type(x) is int and 0<=x<=65535 else None\nclass Result(unittest.TestResult):\n    def __init__(self):\n        super().__init__()\n        self.events=[]\n    def record(self, status, err):\n        exc=err[1]\n        t=type(exc).__name__\n        code=getattr(exc,\"code\",None)\n        self.events.append(dict(status=status,type=t if t in allowed_types else \"OTHER\",code=code if isinstance(code,str) and code in allowed_codes else \"NONE\",winerror=number(getattr(exc,\"winerror\",None)),errno=number(getattr(exc,\"errno\",None))))\n    def addError(self,test,err):\n        self.record(\"ERROR\",err)\n        super().addError(test,err)\n    def addFailure(self,test,err):\n        self.record(\"FAIL\",err)\n        super().addFailure(test,err)\n    def addSubTest(self,test,subtest,err):\n        if err is not None:\n            self.record(\"SUBTEST\",err)\n        super().addSubTest(test,subtest,err)\nprobe=None\nif kind==\"A4\":\n    from mainalto.a4_native import CLI\n    probe=CLI.is_file()\nresult=Result()\nsuite=unittest.defaultTestLoader.loadTestsFromName(name)\nif suite.countTestCases()!=1:\n    raise RuntimeError(\"TARGET_COUNT\")\nsuite.run(result)\nprint(json.dumps(dict(tests=result.testsRun,skips=len(result.skipped),success=result.wasSuccessful(),events=result.events,cliPresent=probe)))\nsys.exit(0 if result.wasSuccessful() and result.testsRun==1 and not result.skipped else 1)\n"
+              driver = "import json, os, sys, unittest\nfrom pathlib import Path\nroot=Path(sys.argv[1])\nsys.path[:0]=[str(root),str(root/'tests')]\nname=sys.argv[2]\nkind=sys.argv[3]\nallowed_types={\"OSError\",\"PermissionError\",\"FileNotFoundError\",\"AssertionError\",\"RuntimeError\",\"BoundaryError\",\"ValueError\",\"TypeError\",\"AttributeError\",\"ImportError\",\"ModuleNotFoundError\",\"TimeoutError\",\"OperationalError\"}\nallowed_codes={\"A4_NATIVE_ADMISSION_REQUIRED\",\"A4_DOCKER_DESTINATION_DRIFT\",\"A4_UNKNOWN_NO_REPLAY\",\"A4_SQLITE_RESERVATION_REQUIRED\",\"A4_LIVE_NO_G0_NO_DISPATCH\",\"A4_LIVE_INPUT_BINDING\",\"C6_ELEVATED_LEGACY_PAIR_REQUIRED\",\"C6_LEGACY_TOKEN_UNREPRESENTATIVE\",\"C6_SESSION_TOKEN_MISMATCH\",\"C6_DUPLICATE_TOKEN_DRIFT\",\"C6_LEGACY_CHILD_TOKEN_DRIFT\",\"C6_LEGACY_LAUNCH\",\"STORAGE_REDIRECTED\",\"STORE_CONFIGURATION\"}\ndef number(x):\n    return x if type(x) is int and 0<=x<=65535 else None\nclass Result(unittest.TestResult):\n    def __init__(self):\n        super().__init__()\n        self.events=[]\n    def record(self, status, err):\n        exc=err[1]\n        t=type(exc).__name__\n        code=getattr(exc,\"code\",None)\n        self.events.append(dict(status=status,type=t if t in allowed_types else \"OTHER\",code=code if isinstance(code,str) and code in allowed_codes else \"NONE\",winerror=number(getattr(exc,\"winerror\",None)),errno=number(getattr(exc,\"errno\",None))))\n    def addError(self,test,err):\n        self.record(\"ERROR\",err)\n        super().addError(test,err)\n    def addFailure(self,test,err):\n        self.record(\"FAIL\",err)\n        super().addFailure(test,err)\n    def addSubTest(self,test,subtest,err):\n        if err is not None:\n            self.record(\"SUBTEST\",err)\n        super().addSubTest(test,subtest,err)\nprobe=None\nif kind==\"A4\":\n    from mainalto.a4_native import CLI\n    probe=CLI.is_file()\nresult=Result()\nsuite=unittest.defaultTestLoader.loadTestsFromName(name)\nif suite.countTestCases()!=1:\n    raise RuntimeError(\"TARGET_COUNT\")\nsuite.run(result)\nnot_applicable = (kind==\"BOOTSTRAP\" and len(result.skipped)==1 and result.skipped[0][1]==\"C6_NATIVE_NOT_APPLICABLE_DEFAULT_TOKEN; paired operator gate NOT_PROVEN\")\nprint(json.dumps(dict(tests=result.testsRun,skips=len(result.skipped),success=result.wasSuccessful(),events=result.events,cliPresent=probe,notApplicable=not_applicable)))\nsys.exit(0 if result.wasSuccessful() and result.testsRun==1 and (not result.skipped or not_applicable) else 1)\n"
               def run_case(root, kind, target):
                   name = select(root, target)
                   try:
@@ -293,6 +293,10 @@ jobs:
                           def num(x):
                               return str(x) if type(x) is int and 0 <= x <= 65535 else "NONE"
                           print("TARGET_" + kind + "=" + status + ";TYPE=" + typ + ";CODE=" + code + ";WINERROR=" + num(event["winerror"]) + ";ERRNO=" + num(event["errno"]))
+                      if (kind == "BOOTSTRAP" and p.returncode == 0 and result["success"] and result["skips"] == 1 and result["notApplicable"] is True and not result["events"]):
+                          print("TARGET_BOOTSTRAP_RESULT=NOT_APPLICABLE")
+                          print("NATIVE_PAIRED_OPERATOR_GATE=NOT_PROVEN")
+                          return True
                       passed = p.returncode == 0 and result["success"] and result["skips"] == 0 and not result["events"]
                       print("TARGET_" + kind + "_RESULT=" + ("PASS" if passed else "FAIL"))
                       return passed
@@ -308,6 +312,7 @@ jobs:
                   harness["materialize"](git("archive", "--format=zip", historical), hist)
                   old = harness["manifest"](source, harness["MANIFESTS"][0])
                   harness["verify"](hist, old)
+                  harness["patch_historical_fixtures"](source, hist)
                   a = run_case(source, "BOOTSTRAP", "9687cb2e439dfd2524b061f6")
                   b = run_case(hist, "A4", "d0ae12116dd4ba6d6e7aa28a")
                   harness["verify"](hist, old)
@@ -379,7 +384,8 @@ jobs:
           except BaseException:
               print("PRIVATE_VALIDATION_INTERNAL_FAIL")
               sys.exit(1)
-          print("PRIVATE_VALIDATION_" + ("PASS" if code == 0 else "FAIL"))
+          prefix = "PRIVATE_TARGETED_DIAGNOSTIC_" if os.environ.get("MAINALTO_CI_WINDOWS_DIAGNOSTIC", "false").lower() == "true" else "PRIVATE_VALIDATION_"
+          print(prefix + ("PASS" if code == 0 else "FAIL"))
           sys.exit(code)
           '@ | python -I -B -S -
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

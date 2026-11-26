@@ -32,6 +32,36 @@ jobs:
         run: |
           @'
           import base64, os, pathlib, re, subprocess, sys
+          def verify_raw_tree(source, pin, git):
+              import hashlib
+              root = source.resolve()
+              count = 0
+              names = set()
+              for record in git("ls-tree", "-r", "-z", "--full-tree", pin).split(b"\0"):
+                  if not record:
+                      continue
+                  meta, raw_path = record.split(b"\t", 1)
+                  mode, kind, expected = meta.split(b" ")
+                  if mode not in (b"100644", b"100755") or kind != b"blob":
+                      raise RuntimeError()
+                  parts = raw_path.decode("utf-8").split("/")
+                  if any(not p or p in (".", "..") or p.lower() == ".git" or ":" in p or "\\" in p or p.endswith((" ", ".")) for p in parts):
+                      raise RuntimeError()
+                  key = "/".join(parts).casefold()
+                  if key in names:
+                      raise RuntimeError()
+                  names.add(key)
+                  path = root.joinpath(*parts)
+                  if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(root):
+                      raise RuntimeError()
+                  raw = path.read_bytes()
+                  actual = hashlib.sha1(("blob %d\0" % len(raw)).encode("ascii") + raw).hexdigest().encode("ascii")
+                  if actual != expected:
+                      raise RuntimeError()
+                  count += 1
+              if count == 0:
+                  raise RuntimeError()
+              return count
           stage = 'INPUT'
           def main():
               global stage
@@ -59,6 +89,8 @@ jobs:
               git("init", "--template=")
               git("config", "core.autocrlf", "false")
               git("config", "core.longpaths", "true")
+              # In this disposable checkout only, preserve exact committed bytes.
+              (source / ".git" / "info" / "attributes").write_bytes(b"* -text -filter -ident -working-tree-encoding -eol\n")
               git("remote", "add", "origin", "https://github.com/alexbonemberger/MainAlto.git")
               stage = "GIT_FETCH"
               git("fetch", "--no-tags", "--no-recurse-submodules", "origin", pin, auth=True)
@@ -68,6 +100,8 @@ jobs:
               stage = "GIT_IDENTITY"
               if git("rev-parse", "HEAD").decode().strip() != pin:
                   raise RuntimeError()
+              stage = "RAW_TREE"
+              verify_raw_tree(source, pin, git)
               stage = "GIT_CLEAN"
               if git("status", "--porcelain"):
                   raise RuntimeError()
@@ -87,6 +121,36 @@ jobs:
         run: |
           @'
           import os, pathlib, subprocess, sys
+          def verify_raw_tree(source, pin, git):
+              import hashlib
+              root = source.resolve()
+              count = 0
+              names = set()
+              for record in git("ls-tree", "-r", "-z", "--full-tree", pin).split(b"\0"):
+                  if not record:
+                      continue
+                  meta, raw_path = record.split(b"\t", 1)
+                  mode, kind, expected = meta.split(b" ")
+                  if mode not in (b"100644", b"100755") or kind != b"blob":
+                      raise RuntimeError()
+                  parts = raw_path.decode("utf-8").split("/")
+                  if any(not p or p in (".", "..") or p.lower() == ".git" or ":" in p or "\\" in p or p.endswith((" ", ".")) for p in parts):
+                      raise RuntimeError()
+                  key = "/".join(parts).casefold()
+                  if key in names:
+                      raise RuntimeError()
+                  names.add(key)
+                  path = root.joinpath(*parts)
+                  if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(root):
+                      raise RuntimeError()
+                  raw = path.read_bytes()
+                  actual = hashlib.sha1(("blob %d\0" % len(raw)).encode("ascii") + raw).hexdigest().encode("ascii")
+                  if actual != expected:
+                      raise RuntimeError()
+                  count += 1
+              if count == 0:
+                  raise RuntimeError()
+              return count
           def main():
               root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "mainalto-private-ci"
               source = root / "source"
@@ -114,6 +178,7 @@ jobs:
                   return subprocess.run(["git", "-C", str(source), *args], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30, check=True).stdout
               if git("rev-parse", "HEAD").decode().strip() != pin:
                   raise RuntimeError()
+              verify_raw_tree(source, pin, git)
               failed = False
               for name, args in suites:
                   try:
@@ -128,6 +193,7 @@ jobs:
                       failed = True
               if git("rev-parse", "HEAD").decode().strip() != pin:
                   raise RuntimeError()
+              verify_raw_tree(source, pin, git)
               git("diff", "--quiet")
               git("diff", "--cached", "--quiet")
               return 1 if failed else 0

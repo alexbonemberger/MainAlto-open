@@ -1,0 +1,149 @@
+name: Private MainAlto validation
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: private-mainalto-validation
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.repository == 'alexbonemberger/MainAlto-open' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner && github.triggering_actor == github.repository_owner
+    environment: private-validation
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12.10'
+
+      - name: Materialize approved source
+        shell: pwsh
+        env:
+          MAINALTO_CI_READ_TOKEN: ${{ secrets.MAINALTO_CI_READ_TOKEN }}
+          MAINALTO_CI_SOURCE_SHA: ${{ secrets.MAINALTO_CI_SOURCE_SHA }}
+        run: |
+          @'
+          import base64, os, pathlib, re, subprocess, sys
+          def main():
+              token = os.environ.pop("MAINALTO_CI_READ_TOKEN", "")
+              pin = os.environ.pop("MAINALTO_CI_SOURCE_SHA", "")
+              if not token or not re.fullmatch("[0-9a-f]{40}", pin):
+                  raise RuntimeError()
+              root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "mainalto-private-ci"
+              root.mkdir(exist_ok=False)
+              source = root / "source"
+              source.mkdir()
+              env = {k:v for k,v in os.environ.items() if not k.upper().startswith(("GIT_", "MAINALTO_", "ACTIONS_", "GITHUB_", "RUNNER_"))}
+              env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0", GIT_NO_REPLACE_OBJECTS="1", GIT_LFS_SKIP_SMUDGE="1")
+              def git(*args, auth=False):
+                  e = env.copy()
+                  if auth:
+                      header = base64.b64encode(("x-access-token:" + token).encode()).decode()
+                      e.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="http.https://github.com/.extraheader", GIT_CONFIG_VALUE_0="AUTHORIZATION: basic " + header)
+                  p = subprocess.run(["git", "-C", str(source), *args], env=e, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
+                  if p.returncode:
+                      raise RuntimeError()
+                  return p.stdout
+              git("init", "--template=")
+              git("config", "core.autocrlf", "false")
+              git("remote", "add", "origin", "https://github.com/alexbonemberger/MainAlto.git")
+              git("fetch", "--no-tags", "--no-recurse-submodules", "origin", pin, auth=True)
+              token = ""
+              git("checkout", "--detach", pin)
+              if git("rev-parse", "HEAD").decode().strip() != pin or git("status", "--porcelain"):
+                  raise RuntimeError()
+              (root / "approved-pin").write_text(pin, encoding="ascii")
+          try:
+              main()
+          except BaseException:
+              print("PRIVATE_SOURCE_MATERIALIZATION_FAIL")
+              sys.exit(1)
+          print("PRIVATE_SOURCE_MATERIALIZATION_PASS")
+          '@ | python -I -B -S -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run fixed fixture suites
+        shell: pwsh
+        run: |
+          @'
+          import os, pathlib, subprocess, sys
+          def main():
+              root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "mainalto-private-ci"
+              source = root / "source"
+              pin = (root / "approved-pin").read_text(encoding="ascii")
+              allowed = set("PATH PATHEXT SYSTEMROOT WINDIR COMSPEC TEMP TMP TMPDIR HOME USERPROFILE LOCALAPPDATA APPDATA SYSTEMDRIVE HOMEDRIVE HOMEPATH USERNAME USER LOGNAME LANG LC_ALL PROCESSOR_ARCHITECTURE NUMBER_OF_PROCESSORS OS PROGRAMFILES PROGRAMFILES(X86) PROGRAMW6432 ALLUSERSPROFILE PROGRAMDATA".split())
+              env = {k:v for k,v in os.environ.items() if k.upper() in allowed}
+              env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONUTF8="1", GIT_TERMINAL_PROMPT="0", GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_NO_REPLACE_OBJECTS="1")
+              py = sys.executable
+              def discovery(pattern):
+                  return [py, "-B", "-m", "unittest", "discover", "-s", "tests", "-p", pattern, "-v"]
+              suites = [
+                  ("BOOTSTRAP", discovery("test_*bootstrap*.py")),
+                  ("A2", discovery("test_a2*.py")),
+                  ("A4", [py, "-B", "tests/run_a4_reconciled.py", "--require-cogi3-closure"]),
+                  ("COGNITIVE", discovery("test_cognitive*.py")),
+                  ("C5", discovery("test_c5*.py")),
+                  ("C6", discovery("test_c6_native*.py")),
+                  ("A3", discovery("test_a3*.py")),
+                  ("T4", [py, "-IB", "tools/transport_proof.py"]),
+                  ("OFFLINE", [py, "-B", "tools/bootstrap_mainalto.py", "--root", ".", "--offline"])
+              ]
+              if os.name == "nt":
+                  suites.append(("PS7", ["pwsh", "-NoProfile", "-NonInteractive", "-File", "tools/Invoke-MainAltoBootstrap.ps1", "-MainRoot", ".", "-Offline", "-Territory", "gpt-alto"]))
+              def git(*args):
+                  return subprocess.run(["git", "-C", str(source), *args], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30, check=True).stdout
+              if git("rev-parse", "HEAD").decode().strip() != pin:
+                  raise RuntimeError()
+              failed = False
+              for name, args in suites:
+                  try:
+                      p = subprocess.run(args, cwd=source, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=240)
+                      result = "PASS" if p.returncode == 0 else "FAIL"
+                  except subprocess.TimeoutExpired:
+                      result = "TIMEOUT"
+                  except OSError:
+                      result = "START_FAIL"
+                  print(name + "=" + result, flush=True)
+                  if result != "PASS":
+                      failed = True
+              if git("rev-parse", "HEAD").decode().strip() != pin:
+                  raise RuntimeError()
+              git("diff", "--quiet")
+              git("diff", "--cached", "--quiet")
+              return 1 if failed else 0
+          try:
+              code = main()
+          except BaseException:
+              print("PRIVATE_VALIDATION_INTERNAL_FAIL")
+              sys.exit(1)
+          print("PRIVATE_VALIDATION_" + ("PASS" if code == 0 else "FAIL"))
+          sys.exit(code)
+          '@ | python -I -B -S -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Remove temporary checkout
+        if: always()
+        shell: pwsh
+        run: |
+          @'
+          import os, pathlib, shutil, sys
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "mainalto-private-ci"
+          try:
+              if root.exists():
+                  shutil.rmtree(root)
+              if root.exists():
+                  raise RuntimeError()
+          except BaseException:
+              print("PRIVATE_CLEANUP_FAIL")
+              sys.exit(1)
+          print("PRIVATE_CLEANUP_PASS")
+          '@ | python -I -B -S -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
